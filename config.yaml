@@ -1,0 +1,25 @@
+default_store: all
+default_month: current
+input_dir: ./data/input
+output_dir: ./data/output
+log_dir: ./data/logs
+
+validation_rules:
+  allow_consume_exceed_purchase: false
+  allow_refund_exceed_remaining: false
+  min_refund_amount: 0
+  max_refund_ratio: 1.0
+  check_package_split: true
+  check_doctor_commission: true
+  check_consultant_commission: true
+  check_gift_deduction: true
+
+commission_rules:
+  doctor_commission_rate: 0.15
+  consultant_commission_rate: 0.1
+  package_split_method: average
+
+voucher:
+  prefix: TK
+  digit_length: 6
+  start_number: 1
