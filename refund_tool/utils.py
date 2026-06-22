@@ -53,7 +53,7 @@ def parse_int(value) -> int:
 
 
 def format_amount(amount: float) -> str:
-    return f"¥{amount:,.2f}"
+    return f"RMB {amount:,.2f}"
 
 
 def format_date(date: datetime, fmt: str = "%Y-%m-%d") -> str:

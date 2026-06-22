@@ -51,7 +51,7 @@ class LogManager:
 
     def log_refund(self, refund_id: str, status: str, amount: float = 0):
         logger = self.get_logger("refund")
-        logger.info(f"[{refund_id}] {status} - 金额: ¥{amount:.2f}")
+        logger.info(f"[{refund_id}] {status} - 金额: RMB {amount:.2f}")
 
     def get_log_files(self) -> list:
         logs = []

@@ -1,6 +1,7 @@
 """数据导入模块"""
 
 import os
+import json
 import pandas as pd
 from typing import List, Dict, Tuple, Optional
 from datetime import datetime
@@ -9,7 +10,7 @@ from .models import (
     Order, ConsumptionRecord, RefundApplication,
     OrderStatus, RefundStatus,
 )
-from .utils import parse_date, parse_float, parse_int
+from .utils import parse_date, parse_float, parse_int, get_month_range
 
 
 class DataImporter:
@@ -20,9 +21,11 @@ class DataImporter:
         self.refund_applications: Dict[str, RefundApplication] = {}
         self.store_list: List[str] = []
         self.import_stats: Dict[str, int] = {}
+        self.filtered_month: Optional[str] = None
 
     def import_all(self, store_ids: Optional[List[str]] = None,
                    month: Optional[str] = None) -> Tuple[int, int, int]:
+        self.filtered_month = month
         order_count = self.import_orders(store_ids, month)
         record_count = self.import_consumption_records(store_ids, month)
         refund_count = self.import_refund_applications(store_ids, month)
@@ -37,7 +40,8 @@ class DataImporter:
                 df = pd.read_excel(f) if f.endswith(('.xlsx', '.xls')) else pd.read_csv(f)
                 for _, row in df.iterrows():
                     order = self._parse_order(row)
-                    if order and self._filter_store(order.store_id, store_ids):
+                    if order and self._filter_store(order.store_id, store_ids) \
+                            and self._filter_month(order.purchased_at, month):
                         if order.order_id not in self.orders:
                             self.orders[order.order_id] = order
                             count += 1
@@ -57,7 +61,8 @@ class DataImporter:
                 df = pd.read_excel(f) if f.endswith(('.xlsx', '.xls')) else pd.read_csv(f)
                 for _, row in df.iterrows():
                     record = self._parse_consumption_record(row)
-                    if record and self._filter_store(record.store_id, store_ids):
+                    if record and self._filter_store(record.store_id, store_ids) \
+                            and self._filter_month(record.consumed_at, month):
                         self.consumption_records.append(record)
                         count += 1
                         if record.store_id not in self.store_list:
@@ -76,7 +81,8 @@ class DataImporter:
                 df = pd.read_excel(f) if f.endswith(('.xlsx', '.xls')) else pd.read_csv(f)
                 for _, row in df.iterrows():
                     refund = self._parse_refund_application(row)
-                    if refund and self._filter_store(refund.store_id, store_ids):
+                    if refund and self._filter_store(refund.store_id, store_ids) \
+                            and self._filter_month(refund.applied_at, month):
                         if refund.refund_id not in self.refund_applications:
                             self.refund_applications[refund.refund_id] = refund
                             count += 1
@@ -105,12 +111,36 @@ class DataImporter:
             return True
         return store_id in store_ids
 
+    def _filter_month(self, date_obj: datetime, month_str: Optional[str]) -> bool:
+        if not month_str or month_str in ['all', '全部', '']:
+            return True
+        try:
+            parts = month_str.split('-')
+            if len(parts) == 2:
+                year, month = int(parts[0]), int(parts[1])
+                start, end = get_month_range(year, month)
+                return start <= date_obj <= end
+        except (ValueError, IndexError):
+            pass
+        return True
+
     def _parse_order(self, row: pd.Series) -> Optional[Order]:
         try:
             order_id = self._get_value(row, ['订单号', '订单ID', 'order_id', 'id'])
             if not order_id or str(order_id).strip() == '':
                 return None
             order_id = str(order_id).strip()
+
+            is_package = bool(self._get_value(row, ['是否套餐', 'is_package', '套餐标志']))
+            package_items_raw = self._get_value(row, [
+                '套餐明细', '套餐项目', 'package_items', '套餐内容', '包含项目'
+            ])
+            gifts_raw = self._get_value(row, [
+                '赠品信息', '赠品', 'gifts', '赠送项目', '赠品明细'
+            ])
+
+            package_items = self._parse_items_json(package_items_raw, 'package')
+            gifts = self._parse_items_json(gifts_raw, 'gift')
 
             order = Order(
                 order_id=order_id,
@@ -128,18 +158,66 @@ class DataImporter:
                 purchased_at=parse_date(str(self._get_value(row, ['购买日期', '下单时间', 'purchased_at', '订单日期']))) or datetime.now(),
                 consultant_id=str(self._get_value(row, ['咨询师ID', '咨询师编号', 'consultant_id']) or ''),
                 consultant_name=str(self._get_value(row, ['咨询师姓名', '咨询师', 'consultant_name']) or ''),
-                is_package=bool(self._get_value(row, ['是否套餐', 'is_package', '套餐标志'])),
+                is_package=is_package,
+                package_items=package_items,
+                gifts=gifts,
                 status=OrderStatus.NORMAL,
                 remarks=str(self._get_value(row, ['备注', 'remarks', '说明']) or ''),
             )
 
             if order.actual_price == 0 and order.original_price > 0:
-                order.actual_price = order.original_price * order.discount_rate
+                order.actual_price = round(order.original_price * order.discount_rate, 2)
 
             return order
         except Exception as e:
             print(f"解析订单行失败: {e}")
             return None
+
+    def _parse_items_json(self, raw_value, item_type: str) -> List[Dict]:
+        items = []
+        if raw_value is None or (isinstance(raw_value, float) and pd.isna(raw_value)):
+            return items
+        raw_str = str(raw_value).strip()
+        if not raw_str or raw_str in ['nan', 'NaN', 'None', '']:
+            return items
+
+        try:
+            parsed = json.loads(raw_str)
+            if isinstance(parsed, list):
+                for it in parsed:
+                    if isinstance(it, dict):
+                        items.append({
+                            'id': str(it.get('id', it.get('item_id', ''))),
+                            'name': str(it.get('name', it.get('item_name', ''))),
+                            'price': parse_float(it.get('price', it.get('amount', 0))),
+                            'quantity': parse_float(it.get('quantity', it.get('qty', 1))),
+                        })
+            return items
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        try:
+            parts = raw_str.split(';')
+            for part in parts:
+                part = part.strip()
+                if not part:
+                    continue
+                sub_parts = [p.strip() for p in part.split('|')]
+                name = sub_parts[0] if len(sub_parts) > 0 else ''
+                price = parse_float(sub_parts[1]) if len(sub_parts) > 1 else 0.0
+                qty = parse_float(sub_parts[2]) if len(sub_parts) > 2 else 1
+                if name:
+                    items.append({
+                        'id': '',
+                        'name': name,
+                        'price': price,
+                        'quantity': qty,
+                    })
+            return items
+        except Exception:
+            pass
+
+        return items
 
     def _parse_consumption_record(self, row: pd.Series) -> Optional[ConsumptionRecord]:
         try:
@@ -194,6 +272,8 @@ class DataImporter:
                 'processed': RefundStatus.PROCESSED,
                 '已处理': RefundStatus.PROCESSED,
                 '已完成': RefundStatus.PROCESSED,
+                'exception': RefundStatus.EXCEPTION,
+                '异常': RefundStatus.EXCEPTION,
             }
             status = status_map.get(status_str, RefundStatus.PENDING)
 
@@ -241,9 +321,12 @@ class DataImporter:
         return self.refund_applications.get(refund_id)
 
     def get_summary(self) -> Dict[str, int]:
-        return {
+        summary = {
             "订单数": len(self.orders),
             "消费记录数": len(self.consumption_records),
             "退款申请数": len(self.refund_applications),
             "门店数": len(self.store_list),
         }
+        if self.filtered_month:
+            summary["核算月份"] = self.filtered_month
+        return summary

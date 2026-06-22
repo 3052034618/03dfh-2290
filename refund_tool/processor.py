@@ -73,6 +73,9 @@ class ResultProcessor:
                     count += 1
         return count
 
+    def is_confirmed(self) -> bool:
+        return len(self.confirmed_results) > 0
+
     def generate_vouchers(self, results: Optional[List[RefundResult]] = None) -> List[Voucher]:
         if results is None:
             results = self.confirmed_results
@@ -118,6 +121,12 @@ class ResultProcessor:
             filename = f"退款核算表_{datetime.now().strftime('%Y%m%d')}.xlsx"
         filepath = os.path.join(self.output_dir, sanitize_filename(filename))
 
+        columns = [
+            "退款单号", "订单号", "门店ID", "门店名称", "客户ID", "客户姓名",
+            "项目ID", "项目名称", "退款数量", "应退金额", "医生提成扣减",
+            "咨询师提成扣减", "赠品扣减", "实退金额", "剩余数量", "剩余金额",
+            "凭证号", "处理时间", "备注",
+        ]
         data = []
         for r in results:
             data.append({
@@ -142,7 +151,7 @@ class ResultProcessor:
                 "备注": r.remarks,
             })
 
-        df = pd.DataFrame(data)
+        df = pd.DataFrame(data, columns=columns) if data else pd.DataFrame(columns=columns)
         df.to_excel(filepath, index=False, engine="openpyxl")
         return filepath
 
@@ -155,6 +164,11 @@ class ResultProcessor:
             filename = f"业绩冲减表_{datetime.now().strftime('%Y%m%d')}.xlsx"
         filepath = os.path.join(self.output_dir, sanitize_filename(filename))
 
+        detail_columns = [
+            "凭证号", "门店ID", "门店名称", "项目名称", "退款金额",
+            "医生提成冲减", "咨询师提成冲减", "赠品成本冲减", "净业绩冲减",
+            "退款单号", "订单号", "客户姓名",
+        ]
         data = []
         for r in results:
             data.append({
@@ -172,82 +186,130 @@ class ResultProcessor:
                 "客户姓名": r.customer_name,
             })
 
-        df = pd.DataFrame(data)
+        df = pd.DataFrame(data, columns=detail_columns) if data else pd.DataFrame(columns=detail_columns)
 
         with pd.ExcelWriter(filepath, engine="openpyxl") as writer:
             df.to_excel(writer, sheet_name="业绩冲减明细", index=False)
 
-            summary_by_store = df.groupby(["门店ID", "门店名称"]).agg({
-                "退款金额": "sum",
-                "医生提成冲减": "sum",
-                "咨询师提成冲减": "sum",
-                "赠品成本冲减": "sum",
-                "净业绩冲减": "sum",
-            }).reset_index()
+            if data:
+                summary_by_store = df.groupby(["门店ID", "门店名称"], dropna=False).agg({
+                    "退款金额": "sum",
+                    "医生提成冲减": "sum",
+                    "咨询师提成冲减": "sum",
+                    "赠品成本冲减": "sum",
+                    "净业绩冲减": "sum",
+                }).reset_index()
+            else:
+                summary_by_store = pd.DataFrame(
+                    columns=["门店ID", "门店名称", "退款金额", "医生提成冲减",
+                             "咨询师提成冲减", "赠品成本冲减", "净业绩冲减"]
+                )
             summary_by_store.to_excel(writer, sheet_name="按门店汇总", index=False)
 
-            summary_by_item = df.groupby("项目名称").agg({
-                "退款金额": "sum",
-                "净业绩冲减": "sum",
-            }).reset_index()
+            if data:
+                summary_by_item = df.groupby("项目名称", dropna=False).agg({
+                    "退款金额": "sum",
+                    "净业绩冲减": "sum",
+                }).reset_index()
+            else:
+                summary_by_item = pd.DataFrame(columns=["项目名称", "退款金额", "净业绩冲减"])
             summary_by_item.to_excel(writer, sheet_name="按项目汇总", index=False)
 
         return filepath
 
     def export_review_list(self, exceptions: List[Dict],
                            filename: str = "") -> str:
+        exceptions = exceptions or []
+
         if not filename:
             filename = f"待复核名单_{datetime.now().strftime('%Y%m%d')}.xlsx"
         filepath = os.path.join(self.output_dir, sanitize_filename(filename))
 
+        columns = [
+            "异常ID", "关联单号", "严重程度", "异常类型", "异常描述",
+            "门店ID", "发现时间", "处理状态", "处理意见", "处理人", "详细信息",
+        ]
         data = []
         for e in exceptions:
+            if e.get("handled", False):
+                continue
             data.append({
-                "关联单号": e["related_id"],
-                "异常类型": e["type_name"],
-                "异常描述": e["message"],
+                "异常ID": e.get("exception_id", ""),
+                "关联单号": e.get("related_id", ""),
+                "严重程度": e.get("severity", "低"),
+                "异常类型": e.get("type_name", ""),
+                "异常描述": e.get("message", ""),
                 "门店ID": e.get("store_id", ""),
-                "发现时间": e["detected_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(e["detected_at"], datetime) else str(e["detected_at"]),
+                "发现时间": e["detected_at"].strftime("%Y-%m-%d %H:%M:%S")
+                    if isinstance(e.get("detected_at"), datetime)
+                    else str(e.get("detected_at", "")),
                 "处理状态": "已处理" if e.get("handled", False) else "待处理",
                 "处理意见": e.get("handler_opinion", ""),
+                "处理人": e.get("handler", ""),
                 "详细信息": str(e.get("details", {})),
             })
 
-        df = pd.DataFrame(data)
+        df = pd.DataFrame(data, columns=columns) if data else pd.DataFrame(columns=columns)
         df.to_excel(filepath, index=False, engine="openpyxl")
         return filepath
 
     def export_exception_report(self, exceptions: List[Dict],
                                 filename: str = "") -> str:
+        exceptions = exceptions or []
+
         if not filename:
             filename = f"异常报告_{datetime.now().strftime('%Y%m%d')}.xlsx"
         filepath = os.path.join(self.output_dir, sanitize_filename(filename))
 
+        base_columns = [
+            "异常ID", "关联单号", "严重程度", "异常类型", "异常描述",
+            "门店ID", "发现时间", "处理状态", "处理意见", "处理人", "处理时间",
+        ]
         data = []
         for e in exceptions:
-            details = e.get("details", {})
+            details = e.get("details", {}) or {}
             row = {
-                "关联单号": e["related_id"],
-                "异常类型": e["type_name"],
-                "异常描述": e["message"],
+                "异常ID": e.get("exception_id", ""),
+                "关联单号": e.get("related_id", ""),
+                "严重程度": e.get("severity", "低"),
+                "异常类型": e.get("type_name", ""),
+                "异常描述": e.get("message", ""),
                 "门店ID": e.get("store_id", ""),
-                "发现时间": e["detected_at"].strftime("%Y-%m-%d %H:%M:%S") if isinstance(e["detected_at"], datetime) else str(e["detected_at"]),
+                "发现时间": e["detected_at"].strftime("%Y-%m-%d %H:%M:%S")
+                    if isinstance(e.get("detected_at"), datetime)
+                    else str(e.get("detected_at", "")),
                 "处理状态": "已处理" if e.get("handled", False) else "待处理",
                 "处理意见": e.get("handler_opinion", ""),
+                "处理人": e.get("handler", ""),
+                "处理时间": e["handled_at"].strftime("%Y-%m-%d %H:%M:%S")
+                    if isinstance(e.get("handled_at"), datetime)
+                    else "",
             }
             for k, v in details.items():
                 row[f"详情_{k}"] = v
             data.append(row)
 
-        df = pd.DataFrame(data)
+        df = pd.DataFrame(data) if data else pd.DataFrame(columns=base_columns)
 
         with pd.ExcelWriter(filepath, engine="openpyxl") as writer:
             df.to_excel(writer, sheet_name="异常明细", index=False)
 
-            summary = df.groupby("异常类型").agg(
-                数量=("异常类型", "count"),
-            ).reset_index()
+            if data:
+                summary = df.groupby(["异常类型", "处理状态"], dropna=False).agg(
+                    数量=("异常类型", "count"),
+                ).reset_index()
+            else:
+                summary = pd.DataFrame(columns=["异常类型", "处理状态", "数量"])
             summary.to_excel(writer, sheet_name="异常汇总", index=False)
+
+            sev_df = df.copy() if data else pd.DataFrame(columns=["严重程度", "数量"])
+            if data:
+                sev_summary = df.groupby("严重程度", dropna=False).agg(
+                    数量=("严重程度", "count"),
+                ).reset_index()
+            else:
+                sev_summary = pd.DataFrame(columns=["严重程度", "数量"])
+            sev_summary.to_excel(writer, sheet_name="按严重程度", index=False)
 
         return filepath
 

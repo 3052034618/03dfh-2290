@@ -1,0 +1,13 @@
+{
+  "params": {
+    "store_ids": null,
+    "month": "2026-06",
+    "updated_at": "2026-06-22T08:08:56.243388"
+  },
+  "importer_saved_at": "2026-06-22T08:13:30.004739",
+  "validator_saved_at": "2026-06-22T08:13:30.006549",
+  "processor_saved_at": "2026-06-22T08:13:30.008082",
+  "exceptions_saved_at": "2026-06-22T08:13:30.009566",
+  "trial_results_saved_at": "2026-06-22T08:13:30.011016",
+  "confirmed_saved_at": "2026-06-22T08:13:30.012467"
+}
