@@ -231,7 +231,7 @@ class RefundCLI:
             self.print_info("暂无异常需要处理")
             return 0
 
-        unhandled = [e for e in self.exceptions if not e.get("handled")]
+        unhandled = [e for e in self.exceptions if not e.get("handled") or e.get("outcome") == "pending"]
         if not unhandled:
             self.print_info("所有异常已处理完成")
             return 0
@@ -241,7 +241,7 @@ class RefundCLI:
         total = len(unhandled)
         processed = 0
         for idx, e in enumerate(self.exceptions):
-            if e.get("handled"):
+            if e.get("handled") and e.get("outcome") != "pending":
                 continue
 
             processed += 1
@@ -260,10 +260,10 @@ class RefundCLI:
 
             print()
             print("请选择处理方式:")
-            print("  [1] 调整后通过 - 标记为已处理（保留该笔数据）")
-            print("  [2] 不予退款 - 标记为已处理（剔除该笔）")
-            print("  [3] 门店核实后再处理 - 标记待复核")
-            print("  [4] 输入自定义处理意见")
+            print(f"  {Fore.GREEN}[1]{Style.RESET_ALL} 调整后通过 - 保留该笔退款，纳入试算和报表")
+            print(f"  {Fore.RED}[2]{Style.RESET_ALL} 不予退款 - 剔除该笔退款，不纳入试算")
+            print(f"  {Fore.YELLOW}[3]{Style.RESET_ALL} 待门店核实 - 保持待处理状态")
+            print(f"  {Fore.BLUE}[4]{Style.RESET_ALL} 自定义处理（需指定保留/剔除）")
             if processed < total:
                 print("  [s] 跳过此条")
             print("  [q] 退出处理流程")
@@ -280,39 +280,64 @@ class RefundCLI:
             if action in ["s", "skip"]:
                 continue
 
-            opinions = {
-                "1": "财务核实：数据属实，调整后通过退款",
-                "2": "财务裁定：依据异常情况，不予退款",
-                "3": "待门店补充材料核实后再处理",
-            }
+            outcome = "pending"
+            opinion = ""
 
-            if action == "4":
+            if action == "1":
+                outcome = "keep"
+                opinion = "财务核实：数据属实，调整后通过退款"
+            elif action == "2":
+                outcome = "reject"
+                opinion = "财务裁定：依据异常情况，不予退款"
+            elif action == "3":
+                outcome = "pending"
+                opinion = "待门店补充材料核实后再处理"
+                e["handled"] = False
+                e["outcome"] = "pending"
+                e["handler_opinion"] = opinion
+                e["handler"] = ""
+                e["handled_at"] = None
+                self.print_warning(f"已标记：{opinion}")
+                continue
+            elif action == "4":
                 opinion = click.prompt("请输入处理意见", default="", type=str)
                 if not opinion.strip():
-                    opinion = "已人工复核，标记为处理"
-            else:
-                opinion = opinions[action]
-                extra = click.prompt(f"补充说明(可留空)", default="", type=str)
+                    opinion = "已人工复核"
+                print("  处理结果：")
+                print("    [1] 保留（纳入试算和报表）")
+                print("    [2] 剔除（不予退款）")
+                while True:
+                    out_choice = click.prompt("请选择", default="1", type=str).strip()
+                    if out_choice in ["1", "2"]:
+                        break
+                    self.print_warning("请输入 1 或 2")
+                outcome = "keep" if out_choice == "1" else "reject"
+
+            if action in ["1", "2", "4"]:
+                extra = click.prompt("补充说明(可留空)", default="", type=str)
                 if extra.strip():
                     opinion = f"{opinion}；{extra.strip()}"
 
             handler = click.prompt("处理人姓名", default="财务专员", type=str)
 
+            if self.validator:
+                self.validator.mark_exception_handled(
+                    e.get("exception_id", ""), opinion, handler, outcome
+                )
+
             e["handled"] = True
+            e["outcome"] = outcome
             e["handler_opinion"] = opinion
             e["handler"] = handler
             e["handled_at"] = datetime.now()
 
-            if self.validator:
-                self.validator.mark_exception_handled(
-                    e.get("exception_id", ""), opinion, handler
-                )
-
-            self.print_success(f"已处理：{opinion[:30]}")
+            outcome_text = "保留（纳入试算）" if outcome == "keep" else "剔除（不予退款）"
+            self.print_success(f"已处理：{outcome_text} - {opinion[:30]}")
 
         self._persist()
 
-        still_unhandled = len([e for e in self.exceptions if not e.get("handled")])
+        still_unhandled = len([e for e in self.exceptions
+                               if not e.get("handled") or e.get("outcome") == "pending"])
         self.print_info(f"当前异常处理状态：已处理 {len(self.exceptions) - still_unhandled}/{len(self.exceptions)}，待处理 {still_unhandled}")
 
         if still_unhandled > 0:
@@ -321,16 +346,17 @@ class RefundCLI:
         return processed
 
     def check_all_exceptions_handled(self) -> bool:
-        """检查是否所有异常都已处理"""
+        """检查是否所有异常都已处理且有明确结果"""
         if not self.exceptions:
             return True
-        unhandled = [e for e in self.exceptions if not e.get("handled")]
+        unhandled = [e for e in self.exceptions
+                     if not e.get("handled") or e.get("outcome") == "pending"]
         if unhandled:
             high_sev = [e for e in unhandled if e.get("severity") == "高"]
             if high_sev:
-                self.print_error(f"存在 {len(high_sev)} 条高危异常未处理，不允许进入结果确认")
+                self.print_error(f"存在 {len(high_sev)} 条高危异常未处理或结果待定，不允许进入结果确认")
             else:
-                self.print_warning(f"存在 {len(unhandled)} 条异常未处理")
+                self.print_warning(f"存在 {len(unhandled)} 条异常未处理或结果待定")
             return False
         return True
 
@@ -351,9 +377,12 @@ class RefundCLI:
             self.print_error("请先处理所有异常后再进行试算 (命令: handle-exceptions)")
             return None
 
+        if self.validator:
+            self.validator.apply_all_outcomes()
+
         normal_refunds = {
             rid: r for rid, r in self.importer.refund_applications.items()
-            if not r.is_exception
+            if not r.is_exception and r.status != RefundStatus.REJECTED
         }
 
         if not normal_refunds:

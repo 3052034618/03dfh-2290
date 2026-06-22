@@ -17,11 +17,15 @@ class ValidationEngine:
         self.commission_rules = self.config.get("commission_rules", {})
         self.exceptions: List[Dict] = []
         self.validation_results: Dict[str, List[Dict]] = {}
+        self._orders: Dict[str, Order] = {}
+        self._refund_applications: Dict[str, RefundApplication] = {}
 
     def validate_all(self, orders: Dict[str, Order],
                      consumption_records: List[ConsumptionRecord],
                      refund_applications: Dict[str, RefundApplication]) -> List[Dict]:
         self.exceptions = []
+        self._orders = orders
+        self._refund_applications = refund_applications
 
         for order_id, order in orders.items():
             self._validate_order(order, consumption_records, refund_applications)
@@ -113,25 +117,28 @@ class ValidationEngine:
             )
             return
 
-        total_package_price = 0.0
+        single_package_price = 0.0
         for pkg_item in order.package_items:
             item_price = float(pkg_item.get("price", 0))
             item_qty = float(pkg_item.get("quantity", 1))
-            total_package_price += item_price * item_qty
+            single_package_price += item_price * item_qty
 
-        expected_total = order.actual_price * order.purchase_quantity
-        if abs(total_package_price - expected_total) > 0.01:
-            self._add_exception(
-                order.order_id,
-                ExceptionType.PACKAGE_SPLIT_ERROR,
-                f"套餐明细合计金额({total_package_price:.2f})与套餐总价({expected_total:.2f})不符",
-                order.store_id,
-                {"order_id": order.order_id, "item_name": order.item_name,
-                 "package_items_total": total_package_price,
-                 "expected_total": expected_total,
-                 "diff": round(total_package_price - expected_total, 2),
-                 "package_item_count": len(order.package_items)}
-            )
+        expected_single_price = order.original_price
+        if abs(single_package_price - expected_single_price) > 0.01 and order.purchase_quantity >= 1:
+            ratio = single_package_price / expected_single_price if expected_single_price > 0 else 0
+            if abs(ratio - 1.0) > 0.001:
+                self._add_exception(
+                    order.order_id,
+                    ExceptionType.PACKAGE_SPLIT_ERROR,
+                    f"套餐单份明细合计({single_package_price:.2f})与套餐单份原价({expected_single_price:.2f})不符",
+                    order.store_id,
+                    {"order_id": order.order_id, "item_name": order.item_name,
+                     "single_package_price": round(single_package_price, 2),
+                     "expected_single_price": round(expected_single_price, 2),
+                     "diff": round(single_package_price - expected_single_price, 2),
+                     "package_item_count": len(order.package_items),
+                     "purchase_quantity": order.purchase_quantity}
+                )
 
         method = self.commission_rules.get("package_split_method", "average")
         if method == "average" and len(order.package_items) > 1:
@@ -376,6 +383,7 @@ class ValidationEngine:
             "details": details or {},
             "detected_at": datetime.now(),
             "handled": False,
+            "outcome": "pending",
             "handler_opinion": "",
             "handled_at": None,
             "handler": "",
@@ -495,6 +503,9 @@ class ValidationEngine:
             ])
             remarks = f"{remarks} [赠品扣减: {gift_desc}]" if remarks else f"[赠品扣减: {gift_desc}]"
 
+        is_adj = bool(refund.handler_opinion)
+        exception_op = refund.handler_opinion or ""
+
         return RefundResult(
             refund_id=refund.refund_id,
             order_id=order.order_id,
@@ -515,6 +526,8 @@ class ValidationEngine:
             remaining_amount=new_remaining_amt,
             processed_at=datetime.now(),
             remarks=remarks,
+            is_exception_adjusted=is_adj,
+            exception_opinion=exception_op,
         )
 
     def batch_calculate(self, refund_applications: Dict[str, RefundApplication],
@@ -532,12 +545,61 @@ class ValidationEngine:
         return results
 
     def mark_exception_handled(self, exception_id: str, opinion: str,
-                               handler: str = "财务专员") -> bool:
+                               handler: str = "财务专员",
+                               outcome: str = "keep") -> bool:
         for e in self.exceptions:
             if e.get("exception_id") == exception_id:
                 e["handled"] = True
                 e["handler_opinion"] = opinion
                 e["handled_at"] = datetime.now()
                 e["handler"] = handler
+                e["outcome"] = outcome
                 return True
         return False
+
+    def apply_all_outcomes(self):
+        refund_outcomes: Dict[str, str] = {}
+        for e in self.exceptions:
+            related_id = e.get("related_id", "")
+            if not related_id or not related_id.startswith("RF"):
+                continue
+            outcome = e.get("outcome", "pending")
+            if not e.get("handled"):
+                outcome = "pending"
+            priority = {"keep": 0, "reject": 1, "pending": 2}
+            if related_id not in refund_outcomes:
+                refund_outcomes[related_id] = outcome
+            else:
+                current = refund_outcomes[related_id]
+                if priority.get(outcome, 2) > priority.get(current, 0):
+                    refund_outcomes[related_id] = outcome
+
+        for refund_id, final_outcome in refund_outcomes.items():
+            if refund_id not in self._refund_applications:
+                continue
+            refund = self._refund_applications[refund_id]
+            if final_outcome == "keep":
+                refund.is_exception = False
+                if refund.status == RefundStatus.EXCEPTION:
+                    refund.status = RefundStatus.PENDING
+            elif final_outcome == "reject":
+                refund.is_exception = True
+                refund.status = RefundStatus.REJECTED
+            elif final_outcome == "pending":
+                refund.is_exception = True
+                if refund.status not in [RefundStatus.REJECTED, RefundStatus.PROCESSED]:
+                    refund.status = RefundStatus.EXCEPTION
+
+            opinions = [
+                e.get("handler_opinion", "")
+                for e in self.exceptions
+                if e.get("related_id") == refund_id and e.get("handler_opinion")
+            ]
+            if opinions:
+                refund.handler_opinion = "; ".join(opinions)
+            else:
+                refund.handler_opinion = ""
+
+    def count_pending_outcomes(self) -> int:
+        return len([e for e in self.exceptions
+                    if not e.get("handled") or e.get("outcome") == "pending"])

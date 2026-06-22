@@ -124,6 +124,22 @@ class DataImporter:
             pass
         return True
 
+    def _parse_is_package(self, raw_value) -> bool:
+        if raw_value is None:
+            return False
+        if isinstance(raw_value, bool):
+            return raw_value
+        if isinstance(raw_value, (int, float)):
+            return int(raw_value) == 1
+        s = str(raw_value).strip().lower()
+        true_values = {'1', '是', 'true', 'yes', 'y', '套餐', '是套餐', 'true', 't'}
+        false_values = {'0', '否', 'false', 'no', 'n', '普通', '不是', '不是套餐', 'f', '', 'nan', 'none', 'null'}
+        if s in true_values:
+            return True
+        if s in false_values:
+            return False
+        return False
+
     def _parse_order(self, row: pd.Series) -> Optional[Order]:
         try:
             order_id = self._get_value(row, ['订单号', '订单ID', 'order_id', 'id'])
@@ -131,7 +147,7 @@ class DataImporter:
                 return None
             order_id = str(order_id).strip()
 
-            is_package = bool(self._get_value(row, ['是否套餐', 'is_package', '套餐标志']))
+            is_package = self._parse_is_package(self._get_value(row, ['是否套餐', 'is_package', '套餐标志']))
             package_items_raw = self._get_value(row, [
                 '套餐明细', '套餐项目', 'package_items', '套餐内容', '包含项目'
             ])
@@ -141,6 +157,9 @@ class DataImporter:
 
             package_items = self._parse_items_json(package_items_raw, 'package')
             gifts = self._parse_items_json(gifts_raw, 'gift')
+
+            if not is_package and (len(package_items) > 0 or len(gifts) > 0):
+                is_package = True
 
             order = Order(
                 order_id=order_id,

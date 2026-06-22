@@ -131,6 +131,8 @@ class RefundResult:
     processed_at: datetime
     voucher_number: str = ""
     remarks: str = ""
+    is_exception_adjusted: bool = False
+    exception_opinion: str = ""
 
 
 @dataclass

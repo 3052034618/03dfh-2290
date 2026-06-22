@@ -125,7 +125,7 @@ class ResultProcessor:
             "退款单号", "订单号", "门店ID", "门店名称", "客户ID", "客户姓名",
             "项目ID", "项目名称", "退款数量", "应退金额", "医生提成扣减",
             "咨询师提成扣减", "赠品扣减", "实退金额", "剩余数量", "剩余金额",
-            "凭证号", "处理时间", "备注",
+            "是否异常调整", "异常处理意见", "凭证号", "处理时间", "备注",
         ]
         data = []
         for r in results:
@@ -146,6 +146,8 @@ class ResultProcessor:
                 "实退金额": r.net_refund_amount,
                 "剩余数量": r.remaining_quantity,
                 "剩余金额": r.remaining_amount,
+                "是否异常调整": "是" if r.is_exception_adjusted else "否",
+                "异常处理意见": r.exception_opinion,
                 "凭证号": r.voucher_number,
                 "处理时间": r.processed_at.strftime("%Y-%m-%d %H:%M:%S"),
                 "备注": r.remarks,
@@ -227,12 +229,18 @@ class ResultProcessor:
 
         columns = [
             "异常ID", "关联单号", "严重程度", "异常类型", "异常描述",
-            "门店ID", "发现时间", "处理状态", "处理意见", "处理人", "详细信息",
+            "门店ID", "发现时间", "处理状态", "处理结果", "处理意见", "处理人", "详细信息",
         ]
         data = []
         for e in exceptions:
-            if e.get("handled", False):
+            if e.get("handled", False) and e.get("outcome", "pending") != "pending":
                 continue
+            outcome_raw = e.get("outcome", "pending")
+            outcome_map = {
+                "pending": "待处理",
+                "keep": "保留（纳入试算）",
+                "reject": "剔除（不予退款）",
+            }
             data.append({
                 "异常ID": e.get("exception_id", ""),
                 "关联单号": e.get("related_id", ""),
@@ -244,6 +252,7 @@ class ResultProcessor:
                     if isinstance(e.get("detected_at"), datetime)
                     else str(e.get("detected_at", "")),
                 "处理状态": "已处理" if e.get("handled", False) else "待处理",
+                "处理结果": outcome_map.get(outcome_raw, outcome_raw),
                 "处理意见": e.get("handler_opinion", ""),
                 "处理人": e.get("handler", ""),
                 "详细信息": str(e.get("details", {})),
@@ -263,11 +272,17 @@ class ResultProcessor:
 
         base_columns = [
             "异常ID", "关联单号", "严重程度", "异常类型", "异常描述",
-            "门店ID", "发现时间", "处理状态", "处理意见", "处理人", "处理时间",
+            "门店ID", "发现时间", "处理状态", "处理结果", "处理意见", "处理人", "处理时间",
         ]
         data = []
         for e in exceptions:
             details = e.get("details", {}) or {}
+            outcome_raw = e.get("outcome", "pending")
+            outcome_map = {
+                "pending": "待处理",
+                "keep": "保留（纳入试算）",
+                "reject": "剔除（不予退款）",
+            }
             row = {
                 "异常ID": e.get("exception_id", ""),
                 "关联单号": e.get("related_id", ""),
@@ -279,6 +294,7 @@ class ResultProcessor:
                     if isinstance(e.get("detected_at"), datetime)
                     else str(e.get("detected_at", "")),
                 "处理状态": "已处理" if e.get("handled", False) else "待处理",
+                "处理结果": outcome_map.get(outcome_raw, outcome_raw),
                 "处理意见": e.get("handler_opinion", ""),
                 "处理人": e.get("handler", ""),
                 "处理时间": e["handled_at"].strftime("%Y-%m-%d %H:%M:%S")
